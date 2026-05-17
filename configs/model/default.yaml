@@ -1,0 +1,13 @@
+# E3-VLA default model config (CachedAEDrafter)
+_target_: e3vla.drafter.cached_ae_drafter.CachedAEDrafter
+
+hidden_dim: 512
+action_dim: 7
+chunk_len: 16
+num_layers: 2
+num_heads: 8
+D_r: 16
+D_ee: 7
+action_history_len: 5
+use_image_feature: false
+mixer_mode: weighted  # weighted | attention | mean

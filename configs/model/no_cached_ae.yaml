@@ -1,0 +1,10 @@
+# NoCachedAE ablation: FLASH-style baseline
+_target_: e3vla.drafter.ablation.no_cached_ae.NoCachedAEDrafter
+
+hidden_dim: 512
+action_dim: 7
+chunk_len: 16
+num_layers: 2
+num_heads: 8
+D_r: 16
+action_history_len: 5

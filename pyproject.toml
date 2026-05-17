@@ -1,0 +1,33 @@
+[project]
+name = "e3vla"
+version = "0.1.0"
+description = "FLASH-style Speculative VLA with Cached Action-Expert Latent Drafting"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "hydra-core>=1.3",
+    "wandb",
+    "safetensors",
+    "numpy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+flash = [
+    "openpi @ git+https://github.com/ultra-robotics/openpi",
+    "realtime-vla-flash @ git+https://github.com/dexmal/realtime-vla-flash",
+]
+openpi = [
+    "openpi @ git+https://github.com/ultra-robotics/openpi",
+]
+benchmark = ["e3vla[flash,openpi]"]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

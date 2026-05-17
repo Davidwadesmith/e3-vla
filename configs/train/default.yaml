@@ -1,0 +1,63 @@
+# E3-VLA training config
+defaults:
+  - _self_
+  - model: default
+
+# Data
+data:
+  cache_dir: ???   # required: path to teacher cache
+  max_delta: 50
+  batch_size: 32
+  num_workers: 4
+  val_frac: 0.1
+  split_seed: 42
+
+# Training
+training:
+  epochs: 100
+  lr: 2.0e-3
+  weight_decay: 1.0e-4
+  warmup_steps: 500
+  grad_clip: 1.0
+  eval_interval_epochs: 10
+  early_stop_patience: 5
+  early_stop_min_delta: 1.0e-4
+
+# Loss weights
+loss:
+  lambda_smooth: 0.1
+  lambda_gripper: 0.5
+  lambda_uncert: 0.1
+  lambda_align: 0.0    # disabled in MVP
+
+  # Prefix weighting (FLASH-style)
+  prefix_gamma: 0.9
+  tail_weight: 0.1
+  huber_beta: 1.0
+
+# Staleness training perturbations
+perturbation:
+  enabled: true
+  cache_age_jitter: 2      # ±2 steps
+  pose_noise_std: 0.01     # meters
+  feature_dropout: 0.1
+  gripper_flip_prob: 0.0
+
+# Optimizer
+optimizer: adamw
+
+# Checkpointing
+checkpoint:
+  save_dir: ./checkpoints
+  save_interval_epochs: 10
+  save_best: true
+  best_metric: weighted_huber
+
+# Logging
+logging:
+  wandb_project: e3vla
+  log_interval_steps: 10
+
+# Hardware
+device: cuda
+mixed_precision: false

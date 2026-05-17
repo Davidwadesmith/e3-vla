@@ -1,0 +1,34 @@
+# Speculative policy evaluation config
+defaults:
+  - _self_
+  - model: default
+
+policy:
+  _target_: e3vla.policy.speculative_cached_policy.SpeculativeCachedPolicy
+  chunk_len: 16
+  max_cache_age: 50
+  periodic_full_every_n: 10
+  full_exec_len: 2
+  gripper_full_window: 3
+  action_history_len: 5
+
+verifier:
+  _target_: e3vla.verifier.action_expert_anchor_verifier.ActionExpertAnchorVerifier
+  t_list: [0.10, 0.05]
+  tau_radius: 0.3
+  dist_dims: 6
+  eval_h: 12
+
+prefix_acceptor:
+  _target_: e3vla.verifier.prefix_acceptor.PrefixAcceptor
+  tau_pos: 0.01
+  tau_rot: 0.05
+  tau_grip: 0.1
+  alpha_uncert: 1.0
+  gripper_phase_tighten: 0.5
+
+benchmark:
+  tasks: ["libero_spatial", "libero_object", "libero_goal"]
+  num_episodes: 50
+  max_steps: 300
+  seeds: [42, 123, 456]
