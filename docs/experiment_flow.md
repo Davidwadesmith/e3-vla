@@ -232,3 +232,244 @@ uv run python scripts/run_benchmark.py \
 # 报告
 uv run python scripts/generate_report.py --results .../benchmark_results.json
 ```
+
+---
+
+## 实验后分析（Agent 自动执行）
+
+实验结束后，按以下顺序检查产物并判断是否成功。
+
+### 1. 检查训练是否有效收敛
+
+```bash
+# 查看三个模型的 best val_loss
+for m in no_cached_ae no_offset full_offset; do
+    ckpt=/root/autodl-fs/checkpoints/$m/best.pt
+    if [ -f $ckpt ]; then
+        python -c "
+import torch
+c = torch.load('$ckpt', map_location='cpu', weights_only=False)
+print('$m: val_loss =', c.get('val_loss', 'N/A'), 'epoch =', c.get('epoch', 'N/A'))
+"
+    else
+        echo "$m: CHECKPOINT NOT FOUND"
+    fi
+done
+```
+
+**判定**：
+- 三个 checkpoint 都存在 → 训练正常
+- `val_loss` 在 0.01-0.5 范围 → 正常（取决于 teacher cache 规模）
+- `val_loss > 1.0` → 训练未收敛，检查 teacher cache 是否为空或数据是否错误
+- checkpoint 缺失 → 训练失败或 early_stop 未触发
+
+### 2. 检查 Benchmark 结果文件
+
+```bash
+cat /root/autodl-fs/experiments/results/benchmark_results.json | python -c "
+import json, sys
+data = json.load(sys.stdin)
+results = data.get('results', data if isinstance(data, list) else [])
+print(f'Total result entries: {len(results)}')
+methods = set(r['method'] for r in results)
+print(f'Methods: {methods}')
+for m in sorted(methods):
+    m_results = [r for r in results if r['method'] == m]
+    avg_success = sum(r['success_rate'] for r in m_results) / len(m_results)
+    avg_latency = sum(r['avg_latency_ms'] for r in m_results) / len(m_results)
+    avg_prefix = sum(r['avg_accepted_prefix'] for r in m_results) / len(m_results)
+    avg_fallback = sum(r['fallback_rate'] for r in m_results) / len(m_results)
+    print(f'  {m}: success={avg_success:.3f}, latency={avg_latency:.1f}ms, '
+          f'prefix={avg_prefix:.1f}, fallback={avg_fallback:.3f}')
+"
+```
+
+**重要**：如果方法数量 < 3，说明部分 benchmark 失败。检查对应日志。
+
+### 3. Gate 验证（自动判定）
+
+```bash
+python -c "
+import json, sys
+
+results_path = '/root/autodl-fs/experiments/results/benchmark_results.json'
+try:
+    with open(results_path) as f:
+        data = json.load(f)
+    results = data.get('results', data if isinstance(data, list) else [])
+except FileNotFoundError:
+    print(f'ERROR: {results_path} not found — benchmark may have failed')
+    sys.exit(1)
+
+if not results:
+    print('ERROR: benchmark results are empty')
+    sys.exit(1)
+
+# Group by method
+by_method = {}
+for r in results:
+    by_method.setdefault(r['method'], []).append(r)
+
+def avg(key, rlist):
+    return sum(r[key] for r in rlist) / len(rlist) if rlist else 0
+
+# Initialize all diff variables to safe defaults
+g1_pass, g2_pass, g4_pass = False, False, False
+g1_diff, g2_pdiff, g2_fdiff, g4_pdiff, g4_sdiff = 0, 0, 0, 0, 0
+g1_ok, g2_ok, g4_ok = False, False, False
+
+# Find methods
+no_ae   = by_method.get('NoCachedAE (FLASH baseline)', [])
+no_off  = by_method.get('CachedAE-NoOffset', [])
+ours    = by_method.get('CachedAE-FullOffset (Ours)', [])
+reuse   = by_method.get('Cached Full Action Reuse', [])
+
+print('=== Gate Validation ===')
+print()
+
+# G1: CachedAE-NoOffset vs NoCachedAE
+if no_ae and no_off:
+    g1_ok = True
+    g1_diff = avg('avg_accepted_prefix', no_off) - avg('avg_accepted_prefix', no_ae)
+    g1_pass = g1_diff > 0.5
+    print(f'G1: CachedAE-NoOffset vs NoCachedAE')
+    print(f'    NoCachedAE prefix: {avg(\"avg_accepted_prefix\", no_ae):.1f}')
+    print(f'    NoOffset prefix:   {avg(\"avg_accepted_prefix\", no_off):.1f}')
+    print(f'    diff: {g1_diff:+.1f}  [threshold: >0.5]')
+    print(f'    -> {\"PASS\" if g1_pass else \"FAIL\"}' + 
+          (' — cached AE features improve drafting' if g1_pass else ' — CORE HYPOTHESIS REJECTED'))
+else:
+    print(f'G1: SKIP — missing NoCachedAE ({len(no_ae)} results) or CachedAE-NoOffset ({len(no_off)} results)')
+print()
+
+# G2: CachedAE-FullOffset vs CachedAE-NoOffset
+if no_off and ours:
+    g2_ok = True
+    g2_pdiff = avg('avg_accepted_prefix', ours) - avg('avg_accepted_prefix', no_off)
+    g2_fdiff = avg('fallback_rate', no_off) - avg('fallback_rate', ours)
+    g2_pass = g2_pdiff > 0.5 or g2_fdiff > 0.02
+    print(f'G2: CachedAE-FullOffset vs CachedAE-NoOffset')
+    print(f'    NoOffset prefix: {avg(\"avg_accepted_prefix\", no_off):.1f}, fallback: {avg(\"fallback_rate\", no_off):.3f}')
+    print(f'    Ours prefix:     {avg(\"avg_accepted_prefix\", ours):.1f}, fallback: {avg(\"fallback_rate\", ours):.3f}')
+    print(f'    prefix diff: {g2_pdiff:+.1f}, fallback diff: {g2_fdiff:+.3f}')
+    print(f'    -> {\"PASS\" if g2_pass else \"FAIL\"}' +
+          (' — offset alignment adds value' if g2_pass else ' — offset alignment has no effect'))
+else:
+    print(f'G2: SKIP — missing NoOffset ({len(no_off)} results) or Ours ({len(ours)} results)')
+print()
+
+# G4: Ours vs CachedFullActionReuse
+if ours and reuse:
+    g4_ok = True
+    g4_pdiff = avg('avg_accepted_prefix', ours) - avg('avg_accepted_prefix', reuse)
+    g4_sdiff = avg('success_rate', ours) - avg('success_rate', reuse)
+    g4_pass = g4_pdiff > 1.0 or g4_sdiff > 0.03
+    print(f'G4: Ours vs CachedFullActionReuse')
+    print(f'    Reuse prefix: {avg(\"avg_accepted_prefix\", reuse):.1f}, success: {avg(\"success_rate\", reuse):.3f}')
+    print(f'    Ours prefix:  {avg(\"avg_accepted_prefix\", ours):.1f}, success: {avg(\"success_rate\", ours):.3f}')
+    print(f'    prefix diff: {g4_pdiff:+.1f}, success diff: {g4_sdiff:+.3f}')
+    print(f'    -> {\"PASS\" if g4_pass else \"FAIL\"}' +
+          (' — method complexity justified' if g4_pass else ' — not better than simple action reuse'))
+else:
+    print(f'G4: SKIP — missing Ours ({len(ours)} results) or Reuse ({len(reuse)} results)')
+
+# Summary and next steps
+print()
+print('=== Summary ===')
+all_evaluated = g1_ok and g2_ok and g4_ok
+print(f'Gates evaluable: G1={g1_ok}, G2={g2_ok}, G4={g4_ok}')
+if all_evaluated:
+    print(f'Gates passed:    G1={g1_pass}, G2={g2_pass}, G4={g4_pass}')
+    print()
+    if not g1_pass:
+        print('CRITICAL: Core hypothesis rejected.')
+        print('  cached AE features do not improve draft quality.')
+        print('  Next: try CachedVLMFeature, or reconsider approach.')
+    elif not g2_pass:
+        print('Offset alignment does not add value.')
+        print('  Use CachedAE-NoOffset as the main method.')
+        print('  Paper contribution: cached AE features improve speculative VLA drafting.')
+    elif not g4_pass:
+        print('Method not better than simple action reuse.')
+        print('  Paper contribution needs to be carefully scoped.')
+        print('  Consider: only claim benefit in high-variance or long-horizon tasks.')
+    else:
+        print('All gates passed. Full steam ahead.')
+        print('  Run full_comparison benchmark and start writing.')
+else:
+    missing = []
+    if not g1_ok: missing.append('NoCachedAE or CachedAE-NoOffset')
+    if not g2_ok: missing.append('Ours or CachedAE-NoOffset')
+    if not g4_ok: missing.append('CachedFullActionReuse or Ours')
+    print(f'Cannot fully evaluate — missing results for:')
+    for m in missing: print(f'  - {m}')
+    print('Re-run benchmark with the missing methods.')
+"
+```
+
+### 4. 检查训练 loss 曲线（如果有 wandb）
+
+```bash
+# 如果使用了 wandb online 模式
+python -c "
+import wandb
+api = wandb.Api()
+runs = api.runs('e3vla')
+for run in runs:
+    print(f'{run.name}: {run.state}, val_loss={run.summary.get(\"val/l_total\", \"N/A\")}')
+"
+```
+
+如果没有 wandb，从 checkpoint 直接读取：
+
+```bash
+for m in no_cached_ae no_offset full_offset; do
+    echo "=== $m ==="
+    python -c "
+import torch
+c = torch.load('/root/autodl-fs/checkpoints/$m/best.pt', map_location='cpu', weights_only=False)
+for k, v in c.items():
+    if isinstance(v, (int, float)):
+        print(f'  {k}: {v}')
+"
+done
+```
+
+### 5. 结果文件完整性检查
+
+```bash
+echo "=== Output Inventory ==="
+echo "Teacher cache:"
+du -sh /root/autodl-fs/teacher_cache/
+ls /root/autodl-fs/teacher_cache/metadata/records.jsonl && echo "  metadata OK" || echo "  metadata MISSING"
+ls /root/autodl-fs/teacher_cache/features/shard_0000.safetensors && echo "  features OK" || echo "  features MISSING"
+
+echo ""
+echo "Checkpoints:"
+for m in no_cached_ae no_offset full_offset; do
+    ckpt=/root/autodl-fs/checkpoints/$m/best.pt
+    [ -f $ckpt ] && echo "  $m: $(du -h $ckpt | cut -f1)" || echo "  $m: MISSING"
+done
+
+echo ""
+echo "Results:"
+ls /root/autodl-fs/experiments/results/benchmark_results.json && echo "  results OK" || echo "  results MISSING"
+
+echo ""
+echo "Report:"
+ls /root/autodl-fs/experiments/report/main_table.csv && echo "  main_table OK" || echo "  report not yet generated"
+```
+
+### 6. 常见异常及处理
+
+| 现象 | 可能原因 | 处理 |
+|------|---------|------|
+| `val_loss > 1.0` | 训练未收敛 | 增加 epochs，检查 lr |
+| 三个模型 loss 几乎相同 | Teacher cache 特征无区分力 | 检查 extract_ae_features 是否正确 hook |
+| `accepted_prefix` 始终 < 3 | tau 太严或 drafter 质量差 | 放宽 tau，检查 drafter loss |
+| `fallback_rate > 0.5` | drafter 频繁被拒绝 | 放宽 tau_radius，降低 periodic_full_every_n |
+| `success_rate` 在所有方法都很低 | 环境或模型问题 | 先跑 full_vla baseline 确认基础成功率 |
+| benchmark 只有 1-2 个方法的结果 | 部分 policy 构建失败 | 检查 checkpoint 路径，看 stderr |
+| results 文件为空或不存在 | benchmark 脚本崩溃 | 手动跑单 method: `methods=[ours]` |
+| `speedup < 1.0` | speculative 比 full VLA 还慢 | 增加 full_exec_len，减少 verifier 开销 |
+
