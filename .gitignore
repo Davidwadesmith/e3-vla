@@ -43,3 +43,4 @@ teacher_cache/
 # Environment
 .env
 .env.local
+.claude/
