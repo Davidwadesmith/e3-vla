@@ -1,0 +1,48 @@
+# Benchmark evaluation config
+# Usage: uv run python scripts/run_benchmark.py
+
+defaults:
+  - _self_
+  - model: openpi
+  - env: libero
+
+# Methods to evaluate
+methods:
+  - full_vla
+  - action_reuse
+  - no_cached_ae
+  - cached_ae_no_offset
+  - ours
+
+# Checkpoints
+checkpoint_dir: /root/autodl-fs/checkpoints
+
+# Policy settings
+policy:
+  chunk_len: 16
+  max_cache_age: 50
+  periodic_full_every_n: 10
+  full_exec_len: 2
+  gripper_full_window: 3
+
+# Verifier settings
+verifier:
+  t_list: [0.10, 0.05]
+  tau_radius: 0.3
+  dist_dims: 6
+  eval_h: 12
+
+# Prefix acceptor settings
+acceptor:
+  tau_pos: 0.01
+  tau_rot: 0.05
+  tau_grip: 0.1
+  alpha_uncert: 1.0
+  gripper_phase_tighten: 0.5
+
+# Evaluation
+num_episodes: 50
+max_steps_per_episode: 300
+seeds: [42, 123, 456, 789, 1024]
+max_tasks: 0             # 0 = all tasks
+output_dir: /root/autodl-fs/experiments/results

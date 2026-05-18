@@ -1,0 +1,13 @@
+# Full comparison: all methods including external baselines
+defaults:
+  - default
+
+methods:
+  - full_vla
+  - action_reuse
+  - action_reuse_offset
+  - no_cached_ae
+  - cached_ae_no_offset
+  - ours
+  # External dependencies required below:
+  # - flash   # uncomment after: uv pip install -e '.[flash]'

@@ -1,0 +1,11 @@
+# Ablation study: only E3-VLA internal variants
+defaults:
+  - default
+
+methods:
+  - no_cached_ae
+  - cached_ae_no_offset
+  - ours
+
+# Evaluation
+num_episodes: 30

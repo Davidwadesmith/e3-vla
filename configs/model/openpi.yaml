@@ -1,0 +1,6 @@
+# OpenPI / pi0 model config
+provider: openpi
+checkpoint: ???   # path to pi0 checkpoint (required)
+chunk_len: 16
+action_dim: 7
+ae_layers: [0, 2, 4]  # which AE layers to extract

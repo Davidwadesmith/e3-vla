@@ -1,161 +1,231 @@
 # E3-VLA Experiment Protocol
 
-## Stage 1: Teacher Cache Generation
-
-Generate offline training data from full VLA rollouts.
+## Prerequisites
 
 ```bash
-# Collect teacher cache from LIBERO rollouts
-python scripts/generate_cache.py \
-    env=libero_spatial \
-    model=openpi \
-    output_dir=./teacher_cache \
-    max_episodes=100
+# Core deps
+uv venv && source .venv/bin/activate && uv pip install -e .
+
+# For benchmark with external baselines (optional)
+uv pip install -e ".[benchmark]"
+
+# For LIBERO environment
+pip install libero
+
+# Verify
+python -c "import torch; assert torch.cuda.is_available()"
+python -m pytest tests/ -v  # 26 tests
 ```
 
-**Expected output**: `teacher_cache/` with metadata, features, actions, states.
+---
 
-**Validation**: `test_cache_roundtrip` — verify read-back consistency.
+## Pipeline Overview
 
-## Stage 2: Train NoCachedAE Baseline
+```
+generate_cache.py ──→ teacher_cache/ ──→ train_drafter.py × 3 ──→ checkpoints/
+                                                                       │
+                                                                       ▼
+                                                              run_benchmark.py
+                                                                       │
+                                                                       ▼
+                                                              generate_report.py
+                                                                       │
+                                                          experiments/report/
+```
 
-Train the FLASH-style baseline (no cached AE features).
+---
+
+## Stage 1: Generate Teacher Cache (with real VLA)
+
+Collect full VLA rollout data from LIBERO.
+
+```bash
+# Full suite
+uv run python scripts/generate_cache.py \
+    env=libero \
+    model=openpi \
+    model.checkpoint=/path/to/pi0_checkpoint \
+    output_dir=/root/autodl-fs/teacher_cache \
+    max_episodes=100
+
+# Single-task quick test
+uv run python scripts/generate_cache.py \
+    env.suite=libero_spatial \
+    env.task=libero_spatial_pick_place \
+    model=openpi \
+    output_dir=/root/autodl-fs/teacher_cache \
+    max_episodes=5
+```
+
+**What this does:**
+1. Loads real OpenPI/π₀ model (or any BaseVLAAdapter)
+2. Creates LIBERO environments
+3. Runs full VLA rollouts, collecting per-timestep:
+   - Action Expert features (ae_low, ae_mid, ae_high, ae_mixed)
+   - Target action chunks
+   - Robot states, ee poses
+4. Writes safetensors shards + JSONL metadata
+
+**Output:** `teacher_cache/` with `metadata/`, `features/`, `actions/`, `states/`
+
+**Configuration:** `configs/cache/default.yaml`
+
+---
+
+## Stage 2: Train NoCachedAE Baseline (Gate G1)
+
+FLASH-style baseline without cached AE features.
 
 ```bash
 uv run python scripts/train_drafter.py \
     model=no_cached_ae \
-    data.cache_dir=./teacher_cache \
-    training.epochs=100
+    data.cache_dir=/root/autodl-fs/teacher_cache \
+    training.epochs=100 \
+    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_cached_ae
 ```
 
-**Expected output**: `checkpoints/no_cached_ae_best.pt`
+**Expected:** `checkpoints/no_cached_ae/best.pt`
 
-**Metrics to track**: train/val loss curves, convergence speed.
+---
 
-## Stage 3: Train CachedAE-NoOffset
+## Stage 3: Train CachedAE-NoOffset (Gate G1)
 
-Add cached AE features without offset alignment.
+Cached AE features, no offset alignment.
 
 ```bash
 uv run python scripts/train_drafter.py \
     model=cached_ae_no_offset \
-    data.cache_dir=./teacher_cache \
-    training.epochs=100
+    data.cache_dir=/root/autodl-fs/teacher_cache \
+    training.epochs=100 \
+    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_offset
 ```
 
-**Gate G1**: Compare `accepted_prefix_len` vs NoCachedAE. Must show significant improvement.
+**Gate G1:** Compare `l_total` and accepted prefix length vs NoCachedAE.
+Cached AE features must show measurable improvement.
 
-## Stage 4: Train CachedAE-FullOffset (Ours)
+---
+
+## Stage 4: Train CachedAE-FullOffset (Ours, Gate G2)
 
 Full method with offset alignment.
 
 ```bash
 uv run python scripts/train_drafter.py \
     model=default \
-    data.cache_dir=./teacher_cache \
-    training.epochs=100
+    data.cache_dir=/root/autodl-fs/teacher_cache \
+    training.epochs=100 \
+    checkpoint.save_dir=/root/autodl-fs/checkpoints/full_offset
 ```
 
-**Gate G2**: Compare vs CachedAE-NoOffset. Offset alignment must further improve metrics.
+**Gate G2:** Offset alignment must further improve metrics vs NoOffset.
+
+---
 
 ## Stage 5: Benchmark Evaluation
 
-Run all methods through the same BenchmarkRunner for fair comparison.
+Run all methods through the same environment for fair comparison.
 
 ```bash
-# Run full benchmark suite
+# Ablation study (E3-VLA variants only)
 uv run python scripts/run_benchmark.py \
-    configs/eval/speculative.yaml \
-    methods=[full_vla,reduced_step,action_reuse,flash,no_cached_ae,cached_ae_no_offset,ours]
+    benchmark=ablation \
+    model.checkpoint=/path/to/pi0_checkpoint \
+    checkpoint_dir=/root/autodl-fs/checkpoints
+
+# Full comparison (all methods)
+uv run python scripts/run_benchmark.py \
+    benchmark=full_comparison \
+    model.checkpoint=/path/to/pi0_checkpoint \
+    checkpoint_dir=/root/autodl-fs/checkpoints
 ```
 
-### Method Checklist
+**Methods evaluated:**
 
-- [ ] Full VLA (π₀) — OpenPI thin wrapper
-- [ ] Reduced-step Flow (K=2,3,4) — Config change
-- [ ] Open-loop Full Chunk Reuse — Action reuse baseline
-- [ ] CachedFullActionReuse + Offset — Action reuse + correction
-- [ ] FLASH-style Drafter + Verifier — FLASH thin wrapper
-- [ ] NoCachedAE (our FLASH-style baseline) — Own drafter
-- [ ] CachedAE-NoOffset — Own drafter
-- [ ] CachedAE-FullOffset (Ours) — Full method
-- [ ] Oracle Full L2 Verifier — Oracle only
+| Method | What it tests |
+|--------|---------------|
+| Full VLA (π₀) | Upper bound — accuracy |
+| Cached Full Action Reuse | Simple baseline — complexity justification |
+| Cached Action Reuse + Offset | Simple baseline + correction |
+| NoCachedAE | FLASH-style baseline — Gate G1 |
+| CachedAE-NoOffset | AE features w/o alignment — Gate G1 |
+| CachedAE-FullOffset (Ours) | Full method — Gate G2 |
+| FLASH-style (optional) | External baseline |
 
-### Primary Metrics
+**Metrics collected per method × task:**
+- success_rate, avg_latency_ms, speedup_vs_full
+- avg_accepted_prefix_len, fallback_rate, full_refresh_rate
+- Per-component latency breakdown
 
-| Metric | Direction | Meaning |
-|--------|-----------|---------|
-| Success Rate | ↑ | Task completion rate |
-| E2E Latency | ↓ | End-to-end per-step latency (ms) |
-| Speedup vs Full VLA | ↑ | Multiplicative speedup |
-| Accepted Prefix Length | ↑ | Average accepted draft steps |
-| Fallback Rate | ↓ | Fraction of rounds requiring full refresh |
+**Output:** `experiments/results/benchmark_results.json`
 
-### Secondary Metrics
+---
 
-| Metric | Purpose |
-|--------|---------|
-| `accepted_prefix_len_by_cache_age` | How staleness affects quality |
-| `fallback_rate_by_cache_age` | Staleness-induced fallback |
-| `draft_error_vs_cache_age` | Error growth with age |
-| `false_accept_vs_oracle` | Anchor verifier vs oracle disagreement |
-| `false_accept_vs_rollout` | Anchor verifier acceptance → task failure |
-| `gripper_phase_fallback_rate` | Gripper-related safety |
-| `contact_phase_failure_rate` | Contact stage reliability |
-| `success-latency Pareto AUC` | Aggregate quality metric |
-
-### Latency Breakdown
-
-| Component | Measurement |
-|-----------|-------------|
-| Full Refresh | Time for full VLA forward |
-| Cache Read | RuntimeFeatureCache access |
-| Offset Align | OffsetAlignAdapter forward |
-| Draft | CachedAEDrafter forward |
-| Verify | ActionExpertAnchorVerifier |
-| Total E2E | Sum + environment step |
-
-## Stage 6: Ablation Experiments
-
-### Feature Source Ablation
-- CachedVLMFeature: Replace AE features with VLM features
-- CachedAE-MultiLayer vs CachedAE-FinalLayer
-
-### Offset Component Ablation
-- NoOffset → TimeOnly → PoseOffset → FullOffset
-
-### Threshold Sensitivity
-- Sweep `tau_radius` from 0.1 to 1.0
-- Plot speedup vs success tradeoff curve
-
-### Cache Age Analysis
-- Group results by `cache_age` buckets (0-5, 5-10, 10-20, 20+)
-- Analyze per-phase (approach / contact / grasp / place)
-
-## Stage 7: Report Generation
+## Stage 6: Generate Report
 
 ```bash
 uv run python scripts/generate_report.py \
-    --results ./experiments/results/ \
-    --output ./experiments/report/
+    --results experiments/results/benchmark_results.json \
+    --output experiments/report/
 ```
 
-Outputs:
+**Output files:**
 - `main_table.csv` — Primary comparison table
+- `main_table.md` — Paper-ready markdown table
 - `latency_breakdown.csv` — Per-component timing
-- `ablation.csv` — Ablation study results
-- `threshold_sweep.png` — Speedup-success curve
-- `cache_age_analysis.png` — Staleness impact
 - `metrics.json` — All metrics for downstream analysis
 
-## Success Criteria
+---
 
-The project is considered successful if:
+## Stage 7: Ablation Experiments (after G1/G2 pass)
 
-1. **G1**: CachedAE-NoOffset > NoCachedAE on accepted_prefix_len
-2. **G2**: CachedAE-FullOffset > CachedAE-NoOffset
-3. **G3**: Ours > FLASH-style baseline on success-latency Pareto
-4. **G4**: Ours > CachedFullActionReuse (method complexity justified)
+### Feature source ablation
+```
+CachedVLMFeature:  Replace AE features with VLM features
+AE-MultiLayer:     ae_low + ae_mid + ae_high
+AE-FinalLayer:     ae_high only
+```
 
-If G1 fails, the core hypothesis is invalid — cached AE features don't help.
-If G1 passes but G2 fails, use NoOffset as the main method.
+### Offset component ablation
+```
+NoOffset → TimeOnly → PoseOffset → FullOffset
+```
+
+### Threshold sweep
+```bash
+# Vary tau_radius from 0.1 to 1.0
+for tau in 0.1 0.2 0.3 0.5 0.7 1.0; do
+    uv run python scripts/run_benchmark.py \
+        verifier.tau_radius=$tau \
+        checkpoint_dir=/root/autodl-fs/checkpoints \
+        output_dir=/root/autodl-fs/experiments/sweep_tau_${tau}
+done
+```
+
+### Cache age analysis
+Group results by `cache_age` buckets (0-5, 5-10, 10-20, 20+) to analyze staleness impact.
+
+---
+
+## Success Criteria (Gates)
+
+| Gate | Test | Criterion |
+|------|------|-----------|
+| **G1** | CachedAE-NoOffset vs NoCachedAE | `accepted_prefix_len` significantly longer |
+| **G2** | CachedAE-FullOffset vs CachedAE-NoOffset | Further improvement in prefix or fallback rate |
+| **G3** | Ours vs FLASH-style baseline | Positive shift in success-latency Pareto |
+| **G4** | Ours vs CachedFullActionReuse | Significantly better (complexity justified) |
+
+**If G1 fails:** Core hypothesis invalid — cached AE features do not help.
+**If G1 passes, G2 fails:** Use NoOffset as main method. Offset alignment is decoration.
+**If G3/G4 fail:** Method not worth the added complexity vs simpler alternatives.
+
+---
+
+## Quick Reference
+
+| Stage | Script | Config | Output |
+|-------|--------|--------|--------|
+| Cache | `scripts/generate_cache.py` | `configs/cache/default.yaml` | `teacher_cache/` |
+| Train | `scripts/train_drafter.py` | `configs/train/default.yaml` | `checkpoints/` |
+| Eval | `scripts/run_benchmark.py` | `configs/benchmark/default.yaml` | `experiments/results/` |
+| Report | `scripts/generate_report.py` | — (argparse) | `experiments/report/` |

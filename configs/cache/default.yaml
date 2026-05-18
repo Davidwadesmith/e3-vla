@@ -1,0 +1,23 @@
+# Teacher cache generation config
+# Usage: uv run python scripts/generate_cache.py
+
+defaults:
+  - _self_
+  - model: openpi
+  - env: libero
+
+# Output
+output_dir: /root/autodl-fs/teacher_cache
+shard_size: 1000         # records per safetensors shard
+
+# Collection
+max_episodes: 100        # total episodes to collect
+episodes_per_task: 10    # episodes per LIBERO task
+max_steps_per_episode: 300
+seed_base: 42
+
+# Device
+device: cuda
+
+# Logging
+log_level: INFO
