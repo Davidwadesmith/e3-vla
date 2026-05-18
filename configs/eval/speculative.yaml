@@ -31,4 +31,4 @@ benchmark:
   tasks: ["libero_spatial", "libero_object", "libero_goal"]
   num_episodes: 50
   max_steps: 300
-  seeds: [42, 123, 456]
+  seeds: [42, 123, 456, 789, 1024, 2048, 4096, 8192, 16384, 32768]

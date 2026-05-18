@@ -11,8 +11,11 @@ output_dir: /root/autodl-fs/teacher_cache
 shard_size: 1000         # records per safetensors shard
 
 # Collection
-max_episodes: 100        # total episodes to collect
-episodes_per_task: 10    # episodes per LIBERO task
+# NOTE: max_episodes is capped by (n_tasks × episodes_per_task).
+#   libero_spatial (3 tasks):   max 30 episodes
+#   libero_10 (10 tasks):       max 100 episodes — recommended for training
+max_episodes: 100           # total episodes (requires libero_10 for full 100)
+episodes_per_task: 10       # episodes per LIBERO task
 max_steps_per_episode: 300
 seed_base: 42
 

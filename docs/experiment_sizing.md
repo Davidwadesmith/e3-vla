@@ -139,7 +139,7 @@ vs
 | 训练 episodes | 30 | **≥100** | 每 task 只有 9 集，多样性不足 |
 | 训练 epochs | 100 | **100（保持）** | early_stop 会截断，写 100 无害 |
 | Benchmark episodes | 50 | **50（保持）** | 论文可接受 |
-| Seeds | 5 | **≥10** | 控制 seed-to-seed 方差 |
+| Seeds | 5 | **10（已修正）** | 控制 seed-to-seed 方差 |
 | task suite | `libero_spatial` (3 tasks) | `libero_10` 或 `libero_spatial + object + goal` | 更多 task 证明泛化性 |
 | Threshold sweep 范围 | 6 个 tau × 3 method × 50 ep | **1 个 method (Ours) × 8 个 tau × 20 ep** | 50h → 4h，低端加 0.05/0.15 |
 

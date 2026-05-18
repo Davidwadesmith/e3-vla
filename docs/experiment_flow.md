@@ -122,7 +122,6 @@ uv run python scripts/run_benchmark.py \
     benchmark=ablation \
     model.checkpoint=/path/to/pi0_base \
     checkpoint_dir=/root/autodl-fs/checkpoints \
-    seeds="[42,123,456,789,1024,2048,4096,8192,16384,32768]" \
     num_episodes=50 \
     output_dir=/root/autodl-fs/experiments/results
 ```
