@@ -1,5 +1,96 @@
 # E3-VLA 实验流程说明
 
+## Agent 执行规则（必读）
+
+> 以下规则在实验全过程中**不可违反**。违反任何一条将导致实验结果无效。
+
+### 规则 1：禁止使用 Mock 数据或 Mock 模型
+
+```
+所有实验必须基于真实数据和真实模型。
+
+禁止行为：
+  ✗ 用 torch.randn / torch.zeros 生成合成 teacher cache
+  ✗ 用 MockVLAAdapter 或任何假 adapter 替代真实 VLA
+  ✗ 用随机 tensor 替代 AE features、action chunks、robot states
+  ✗ 在没有 LIBERO 环境的情况下模拟 benchmark rollout
+  ✗ 用合成数据训练 drafter 后声称结果有效
+
+必须行为：
+  ✓ teacher cache 必须由真实 π₀ 模型在真实 LIBERO 环境上 rollout 生成
+  ✓ 所有 AE features 必须来自 OpenPIAdapter.extract_ae_features() 的真实 hook
+  ✓ benchmark 必须在真实 LIBERO 环境中执行，记录实际 success rate 和 latency
+  ✓ 如果某个环节因环境/模型缺失无法完成，报告阻塞，而不是用 mock 绕过
+```
+
+### 规则 2：网络或 HuggingFace 认证问题必须上报
+
+```
+遇到以下情况时，立即暂停并报告，不要自行绕开：
+
+触发条件：
+  ✗ HuggingFace 模型下载返回 401/403（认证问题）
+  ✗ git clone 超时或连接拒绝
+  ✗ pip/uv install 网络错误，更换镜像源仍失败
+  ✗ wandb 登录失败
+  ✗ AutoDL 内部网络异常（如 /root/autodl-fs 无法挂载）
+
+报告格式：
+  "BLOCKED: <具体错误信息>"
+  "Attempted: <已尝试的解决方案>"
+  "Suggested: <建议的解决方案，等待确认>"
+
+不要做的事情：
+  ✗ 不报告就用 --no-auth 或 skip 参数绕过
+  ✗ 换用其他模型/数据源但不告知
+  ✗ 反复重试超过 5 次（避免触发 rate limit）
+```
+
+### 规则 3：代码改动必须先讨论
+
+```
+对仓库中的任何文件进行修改前，必须说明：
+
+  1. 改哪个文件，哪一行
+  2. 为什么需要改（原因）
+  3. 不改会怎样（后果）
+  4. 等待确认后才能执行
+
+不需要讨论的例外（仅限）：
+  - 修改 config 中的路径（如 checkpoint 路径、输出目录）
+  - 修改 config 中的 seeds、num_episodes 等超参数
+  - 安装缺失的 pip 包（如 libero、huggingface_hub）
+  - 执行文档中已有的命令
+
+除此之外的任何 .py / .yaml / .sh 文件修改都需要先讨论。
+```
+
+### 规则 4：所有输出必须 verbose
+
+```
+实验全过程中必须输出充分信息，静默即失败。
+
+必须输出的信息：
+  ✓ 每个阶段开始前：打印阶段名称、预计耗时、关键参数
+  ✓ 每个阶段进行中：每 10 步打印一次进度（loss、step、elapsed）
+  ✓ 每个阶段完成后：打印完成状态、产出文件路径、耗时
+  ✓ 模型加载时：打印参数量、checkpoint 路径
+  ✓ 环境初始化时：打印版本号（Python、torch、CUDA）
+  ✓ 遇到错误时：打印完整 traceback，不要截断
+
+禁止行为：
+  ✗ 长时间无输出（> 5 分钟）——必须打印中间状态
+  ✗ 用 > /dev/null 2>&1 隐藏输出（除非重定向到文件并 tail）
+  ✗ 训练/评测结束时只打印 "Done"——必须打印关键指标
+
+脚本强制要求：
+  - 所有 Python 脚本使用 logging.INFO 级别，不要用 WARNING 或更高
+  - 所有 bash 命令去掉 -q/--quiet 参数
+  - 后台任务用 tee 同时输出到终端和文件：command 2>&1 | tee log.txt
+```
+
+---
+
 ## AutoDL 环境配置
 
 > 本节供 Agent 在 AutoDL 上自动化执行。如使用其他平台可跳过。
@@ -65,7 +156,7 @@ pip install libero
 # uv pip install -e ".[benchmark]"
 
 # 6. 创建数据盘目录（所有大文件放 /root/autodl-tmp）
-mkdir -p /root/autodl-tmp/e3vla/{teacher_cache,checkpoints,experiments}
+mkdir -p /root/autodl-tmp/e3vla/{teacher_cache,checkpoints,experiments,logs}
 
 # 7. 软链到项目目录
 ln -sf /root/autodl-tmp/e3vla/teacher_cache ./teacher_cache
@@ -311,6 +402,12 @@ uv run python scripts/run_benchmark.py \
 │       ├── main_table.md
 │       ├── latency_breakdown.csv
 │       └── metrics.json
+├── logs/                  ← 所有实验日志
+│   ├── cache.log
+│   ├── train_no_cached_ae.log
+│   ├── train_no_offset.log
+│   ├── train_default.log
+│   └── benchmark.log
 └── pi0_checkpoints/       ← π₀ 模型（手动下载）
 
 /root/e3-vla/             ← 系统盘 30 GB（关机保留）
@@ -323,23 +420,33 @@ uv run python scripts/run_benchmark.py \
 
 ```bash
 # 从头跑通（libero_10, 100 episodes）
+# 注意：每条命令用 tee 同时输出到终端和日志文件
+mkdir -p /root/autodl-tmp/e3vla/logs
+
+# Step 1: cache（前台，verbose）
 uv run python scripts/generate_cache.py \
     env.suite=libero_10 \
     model.checkpoint=/root/autodl-tmp/e3vla/pi0_checkpoints/pi0_base \
-    max_episodes=100
+    max_episodes=100 \
+    2>&1 | tee /root/autodl-tmp/e3vla/logs/cache.log
 
-# 三个训练并行
+# Step 2: 三个训练并行（各自 tee 到独立日志）
 for m in no_cached_ae cached_ae_no_offset default; do
-    uv run python scripts/train_drafter.py model=$m training.epochs=100 &
+    uv run python scripts/train_drafter.py model=$m training.epochs=100 \
+        2>&1 | tee /root/autodl-tmp/e3vla/logs/train_${m}.log &
 done
+# 训练过程中可以 tail 任意日志：tail -f /root/autodl-tmp/e3vla/logs/train_default.log
 
-# benchmark（等训练完）
+# Step 3: benchmark（等训练完）
+wait  # 等待所有训练完成，或手动检查日志确认
 uv run python scripts/run_benchmark.py \
     model.checkpoint=/root/autodl-tmp/e3vla/pi0_checkpoints/pi0_base \
-    seeds="[42,123,456,789,1024,2048,4096,8192,16384,32768]"
+    2>&1 | tee /root/autodl-tmp/e3vla/logs/benchmark.log
 
-# 报告
-uv run python scripts/generate_report.py --results .../benchmark_results.json
+# Step 4: 报告
+uv run python scripts/generate_report.py \
+    --results /root/autodl-tmp/e3vla/experiments/results/benchmark_results.json \
+    --output /root/autodl-tmp/e3vla/experiments/report/
 ```
 
 ---
@@ -567,6 +674,10 @@ ls /root/autodl-tmp/e3vla/experiments/results/benchmark_results.json && echo "  
 echo ""
 echo "Report:"
 ls /root/autodl-tmp/e3vla/experiments/report/main_table.csv && echo "  main_table OK" || echo "  report not yet generated"
+
+echo ""
+echo "Logs:"
+ls /root/autodl-tmp/e3vla/logs/
 ```
 
 ### 6. 常见异常及处理

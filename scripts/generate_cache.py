@@ -213,6 +213,7 @@ def main(cfg: DictConfig):
     t0 = time.time()
 
     logger.info(f"Starting {n_episodes} episodes...")
+    log_interval = max(1, n_episodes // 20)  # progress every 5%
 
     for ep in range(n_episodes):
         task_idx = ep % len(env_factory)
@@ -224,6 +225,9 @@ def main(cfg: DictConfig):
                 writer, max_steps=cfg.max_steps_per_episode,
             )
             n_total_timesteps += n_steps
+            if ep % log_interval == 0 or ep == n_episodes - 1:
+                logger.info(f"  [{ep+1}/{n_episodes}] {n_total_timesteps} timesteps collected "
+                            f"({(ep+1)/n_episodes*100:.0f}%)")
         except Exception as e:
             logger.error(f"Episode {ep} (task {task_idx}) failed: {e}")
             continue
