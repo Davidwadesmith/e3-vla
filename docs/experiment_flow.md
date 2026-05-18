@@ -54,14 +54,26 @@ python -c "import torch; assert torch.cuda.is_available()"
 ### Step 1：生成 Teacher Cache（2-4 小时）
 
 ```bash
+# 推荐: libero_10（10 tasks × 10 episodes = 100）
 uv run python scripts/generate_cache.py \
-    env=libero \
+    env.suite=libero_10 \
     model=openpi \
     model.checkpoint=/path/to/pi0_base \
     output_dir=/root/autodl-fs/teacher_cache \
     max_episodes=100 \
     episodes_per_task=10
+
+# 最小验证: libero_spatial（3 tasks × 10 episodes = 30）
+uv run python scripts/generate_cache.py \
+    env=libero \
+    model=openpi \
+    model.checkpoint=/path/to/pi0_base \
+    output_dir=/root/autodl-fs/teacher_cache \
+    max_episodes=30 \
+    episodes_per_task=10
 ```
+
+**数据量评估**：每 task 至少 10 个 episode（最少 30 总），推荐 100+。详细分析见 `docs/experiment_sizing.md`。
 
 **这个过程做什么：**
 1. 加载 π₀ 模型到 GPU
@@ -110,6 +122,7 @@ uv run python scripts/run_benchmark.py \
     benchmark=ablation \
     model.checkpoint=/path/to/pi0_base \
     checkpoint_dir=/root/autodl-fs/checkpoints \
+    seeds="[42,123,456,789,1024,2048,4096,8192,16384,32768]" \
     num_episodes=50 \
     output_dir=/root/autodl-fs/experiments/results
 ```
@@ -138,12 +151,12 @@ uv run python scripts/generate_report.py \
 ### 事后分析（Step 5-7，可选）
 
 ```bash
-# Threshold sweep：扫 tau_radius 画 speedup-success 曲线
-for tau in 0.1 0.2 0.3 0.5 0.7 1.0; do
+# Threshold sweep：只扫 Ours，8 tau × 20 ep，约 2 小时
+for tau in 0.05 0.10 0.15 0.20 0.30 0.50 0.70 1.00; do
     uv run python scripts/run_benchmark.py \
+        methods=[ours] \
         verifier.tau_radius=$tau \
-        checkpoint_dir=/root/autodl-fs/checkpoints \
-        output_dir=/root/autodl-fs/experiments/sweep_${tau}
+        num_episodes=20
 done
 
 # FLASH 竞品对比（需要先安装 uv pip install -e ".[flash]"）
@@ -201,16 +214,21 @@ uv run python scripts/run_benchmark.py \
 ## 快速命令速查
 
 ```bash
-# 从头跑通（假设 π₀ checkpoint 在 /root/autodl-fs/pi0_checkpoints）
-uv run python scripts/generate_cache.py model.checkpoint=/root/autodl-fs/pi0_checkpoints/pi0_base max_episodes=100
+# 从头跑通（libero_10, 100 episodes）
+uv run python scripts/generate_cache.py \
+    env.suite=libero_10 \
+    model.checkpoint=/root/autodl-fs/pi0_checkpoints/pi0_base \
+    max_episodes=100
 
-# 三个训练可以并行
-uv run python scripts/train_drafter.py model=no_cached_ae training.epochs=100 &
-uv run python scripts/train_drafter.py model=cached_ae_no_offset training.epochs=100 &
-uv run python scripts/train_drafter.py model=default training.epochs=100 &
+# 三个训练并行
+for m in no_cached_ae cached_ae_no_offset default; do
+    uv run python scripts/train_drafter.py model=$m training.epochs=100 &
+done
 
-# benchmark（等训练结束后）
-uv run python scripts/run_benchmark.py model.checkpoint=/root/autodl-fs/pi0_checkpoints/pi0_base
+# benchmark（等训练完）
+uv run python scripts/run_benchmark.py \
+    model.checkpoint=/root/autodl-fs/pi0_checkpoints/pi0_base \
+    seeds="[42,123,456,789,1024,2048,4096,8192,16384,32768]"
 
 # 报告
 uv run python scripts/generate_report.py --results .../benchmark_results.json
