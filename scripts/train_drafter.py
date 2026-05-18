@@ -9,6 +9,7 @@ Usage:
 import os
 import sys
 import time
+import logging
 from typing import Optional
 from collections import defaultdict
 
@@ -18,6 +19,14 @@ from torch.utils.data import DataLoader
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
+
+# Configure verbose logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("train_drafter")
 
 # Add project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -93,21 +102,19 @@ def build_dataloaders(cfg: DictConfig) -> tuple:
     return train_loader, val_loader, len(train_ds), len(val_ds)
 
 
-def train_epoch(model, loader, optimizer, cfg, device) -> dict:
+def train_epoch(model, loader, optimizer, cfg, device, epoch, n_epochs) -> dict:
     model.train()
     meters = defaultdict(AverageMeter)
+    total_steps = len(loader)
 
     for batch_idx, sample in enumerate(loader):
-        # Move to device
         batch = {
             k: v.to(device) if isinstance(v, torch.Tensor) else v
             for k, v in sample.items()
         }
-        # Convert TrainingSample to batched dict if needed
         if hasattr(sample, 'target_action_chunk'):
             batch = _training_sample_to_batch(sample, device)
 
-        # Apply staleness perturbations
         if cfg.perturbation.enabled:
             batch = _apply_perturbations(batch, cfg, device)
 
@@ -126,10 +133,12 @@ def train_epoch(model, loader, optimizer, cfg, device) -> dict:
             meters[k].update(v.item())
 
         if batch_idx % cfg.logging.log_interval_steps == 0:
-            log_str = f"  Step {batch_idx}: " + " ".join(
-                f"{k}={v.avg:.4f}" for k, v in meters.items()
+            pct = batch_idx / total_steps * 100
+            gpu_mem = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
+            logger.info(
+                f"  Epoch {epoch+1}/{n_epochs} [{batch_idx}/{total_steps} {pct:.0f}%] "
+                f"loss={loss.item():.4f} | GPU={gpu_mem:.1f}GB"
             )
-            print(log_str)
 
     return {k: v.avg for k, v in meters.items()}
 
@@ -189,20 +198,32 @@ def _apply_perturbations(batch: dict, cfg, device) -> dict:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train/default")
 def main(cfg: DictConfig):
-    print(OmegaConf.to_yaml(cfg))
+    logger.info("=" * 60)
+    logger.info("E3-VLA Drafter Training")
+    logger.info("=" * 60)
+    logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
 
     set_seed(cfg.data.split_seed)
     device = get_device()
-    print(f"Device: {device}")
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        logger.info(f"GPU: {gpu_name} ({gpu_total:.1f} GB)")
+    logger.info(f"Device: {device}")
 
     # Build model
     model = build_model(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model params: {n_params:,}")
+    n_total = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model: {n_params:,} trainable / {n_total:,} total parameters")
 
     # Build data
     train_loader, val_loader, train_size, val_size = build_dataloaders(cfg)
-    print(f"Train samples: {train_size}, Val samples: {val_size}")
+    steps_per_epoch = len(train_loader)
+    logger.info(f"Data: {train_size:,} train / {val_size:,} val samples")
+    logger.info(f"      {steps_per_epoch} steps/epoch × {cfg.training.epochs} epochs = "
+                f"{steps_per_epoch * cfg.training.epochs:,} total steps")
+    logger.info(f"      batch_size={cfg.data.batch_size}, num_workers={cfg.data.num_workers}")
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -210,80 +231,104 @@ def main(cfg: DictConfig):
         lr=cfg.training.lr,
         weight_decay=cfg.training.weight_decay,
     )
-
-    # LR scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.training.epochs
     )
+    logger.info(f"Optimizer: AdamW(lr={cfg.training.lr}, wd={cfg.training.weight_decay})")
+    logger.info(f"LR schedule: CosineAnnealing, warmup={cfg.training.warmup_steps} steps")
 
-    # Wandb
     if cfg.logging.wandb_project:
         wandb.init(
             project=cfg.logging.wandb_project,
             config=OmegaConf.to_container(cfg, resolve=True),
         )
+        logger.info(f"WandB: project={cfg.logging.wandb_project}")
 
     # Training loop
     best_val_loss = float("inf")
+    best_epoch = 0
     patience_counter = 0
     os.makedirs(cfg.checkpoint.save_dir, exist_ok=True)
+    n_epochs = cfg.training.epochs
 
-    for epoch in range(cfg.training.epochs):
+    logger.info("-" * 60)
+    logger.info(f"Starting training: {n_epochs} epochs")
+    logger.info("-" * 60)
+
+    for epoch in range(n_epochs):
         t0 = time.time()
 
-        train_metrics = train_epoch(model, train_loader, optimizer, cfg, device)
+        train_metrics = train_epoch(model, train_loader, optimizer, cfg, device, epoch, n_epochs)
         val_metrics = validate(model, val_loader, cfg, device)
         scheduler.step()
 
         elapsed = time.time() - t0
+        lr_now = optimizer.param_groups[0]["lr"]
+        train_l = train_metrics.get("l_total", 0)
+        val_l = val_metrics.get("l_total", 0)
+        is_best = val_l < best_val_loss - cfg.training.early_stop_min_delta
 
-        # Logging
-        log_dict = {
-            "epoch": epoch,
-            "lr": optimizer.param_groups[0]["lr"],
-            **{f"train/{k}": v for k, v in train_metrics.items()},
-            **{f"val/{k}": v for k, v in val_metrics.items()},
-            "time_per_epoch": elapsed,
-        }
+        # Verbose per-epoch summary
+        status = "★ BEST" if is_best else ""
+        logger.info(
+            f"Epoch {epoch+1:3d}/{n_epochs} | "
+            f"train_loss={train_l:.4f} | val_loss={val_l:.4f} | "
+            f"lr={lr_now:.2e} | time={elapsed:.1f}s {status}"
+        )
 
-        print(f"Epoch {epoch:3d} | "
-              f"train_loss={train_metrics.get('l_total', 0):.4f} | "
-              f"val_loss={val_metrics.get('l_total', 0):.4f} | "
-              f"time={elapsed:.1f}s")
+        # Per-component loss breakdown
+        logger.info(
+            f"  Breakdown: action={train_metrics.get('l_action', 0):.4f} "
+            f"smooth={train_metrics.get('l_smooth', 0):.4f} "
+            f"gripper={train_metrics.get('l_gripper', 0):.4f} "
+            f"uncert={train_metrics.get('l_uncert', 0):.4f}"
+        )
+
+        if torch.cuda.is_available():
+            gpu_used = torch.cuda.memory_allocated(device) / 1e9
+            gpu_max = torch.cuda.max_memory_allocated(device) / 1e9
+            logger.info(f"  GPU: {gpu_used:.1f}GB used, {gpu_max:.1f}GB peak")
 
         if wandb.run:
-            wandb.log(log_dict)
+            wandb.log({
+                "epoch": epoch,
+                "lr": lr_now,
+                **{f"train/{k}": v for k, v in train_metrics.items()},
+                **{f"val/{k}": v for k, v in val_metrics.items()},
+                "time_per_epoch": elapsed,
+                "gpu_memory_gb": torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0,
+            })
 
         # Checkpoint
-        val_loss = val_metrics.get("l_total", 0)
-        is_best = val_loss < best_val_loss - cfg.training.early_stop_min_delta
-
         if is_best:
-            best_val_loss = val_loss
+            best_val_loss = val_l
+            best_epoch = epoch + 1
             patience_counter = 0
             if cfg.checkpoint.save_best:
                 save_checkpoint(
                     model, optimizer,
                     os.path.join(cfg.checkpoint.save_dir, "best.pt"),
-                    epoch=epoch, val_loss=val_loss,
+                    epoch=epoch, val_loss=val_l,
                 )
+                logger.info(f"  Checkpoint saved: {cfg.checkpoint.save_dir}/best.pt")
         else:
             patience_counter += 1
+            logger.info(f"  No improvement for {patience_counter} epochs "
+                        f"(patience={cfg.training.early_stop_patience})")
 
         if epoch % cfg.checkpoint.save_interval_epochs == 0:
-            save_checkpoint(
-                model, optimizer,
-                os.path.join(cfg.checkpoint.save_dir, f"epoch_{epoch:04d}.pt"),
-                epoch=epoch,
-            )
+            path = os.path.join(cfg.checkpoint.save_dir, f"epoch_{epoch:04d}.pt")
+            save_checkpoint(model, optimizer, path, epoch=epoch)
+            logger.info(f"  Periodic checkpoint saved: {path}")
 
-        # Early stopping
         if patience_counter >= cfg.training.early_stop_patience:
-            print(f"Early stopping at epoch {epoch}")
+            logger.info(f"Early stopping triggered after {epoch+1} epochs")
             break
 
-    print(f"Training complete. Best val_loss: {best_val_loss:.4f}")
-    print(f"Best checkpoint: {cfg.checkpoint.save_dir}/best.pt")
+    logger.info("=" * 60)
+    logger.info(f"Training complete. Best val_loss: {best_val_loss:.4f} at epoch {best_epoch}")
+    logger.info(f"Best checkpoint: {cfg.checkpoint.save_dir}/best.pt")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

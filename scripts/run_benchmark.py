@@ -1,20 +1,8 @@
 """Run full benchmark comparison across all methods.
 
 Usage:
-  # Full comparison (all methods, LIBERO)
-  uv run python scripts/run_benchmark.py \
-      benchmark=full_comparison \
-      checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
-
-  # Ablation only (E3-VLA variants)
   uv run python scripts/run_benchmark.py \
       benchmark=ablation \
-      checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
-
-  # Single method quick test
-  uv run python scripts/run_benchmark.py \
-      benchmark=single \
-      benchmark.method=ours \
       checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 """
 
@@ -29,14 +17,19 @@ import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
+# Configure verbose logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("benchmark")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from e3vla.schema import ActionCommand
 from e3vla.eval.rollout_runner import RolloutRunner
 from e3vla.eval.report_writer import ReportWriter, MethodTaskResult
-from e3vla.benchmark.runner import MetricsCollector
-
-logger = logging.getLogger(__name__)
 
 
 def build_libero_env_factory(cfg: DictConfig):
@@ -261,14 +254,28 @@ def run_single_method(
     )
 
     results = []
-    for task_name in task_names:
-        logger.info(f"  Task: {task_name}")
-        ep_results = []
+    n_episodes = cfg.num_episodes
+    log_interval = max(1, n_episodes // 10)  # progress every 10%
 
-        for ep in range(cfg.num_episodes):
+    for task_name in task_names:
+        logger.info(f"  Task: {task_name} ({n_episodes} episodes)")
+        ep_results = []
+        t_task_start = time.time()
+
+        for ep in range(n_episodes):
             seed = cfg.seeds[ep % len(cfg.seeds)]
             result = runner.run_episode(policy, task_name, seed=seed)
             ep_results.append(result)
+
+            if ep % log_interval == 0 or ep == n_episodes - 1:
+                succ_so_far = sum(1 for r in ep_results if r.success)
+                avg_lat = sum(r.average_latency_ms for r in ep_results) / len(ep_results)
+                logger.info(
+                    f"    [{ep+1}/{n_episodes}] success={succ_so_far}/{ep+1} "
+                    f"({succ_so_far/(ep+1)*100:.0f}%) | avg_latency={avg_lat:.1f}ms"
+                )
+
+        elapsed_task = time.time() - t_task_start
 
         # Aggregate
         successes = sum(1 for r in ep_results if r.success)
@@ -283,6 +290,12 @@ def run_single_method(
         fallback_rate = total_fallback / max(1, total_fallback + total_spec)
         full_refresh_rate = total_full / max(1, total_steps_all)
 
+        logger.info(
+            f"    Task complete in {elapsed_task:.1f}s: success={successes}/{n_episodes} "
+            f"({successes/n_episodes:.1%}) | latency={avg_latency:.1f}ms | "
+            f"prefix={avg_prefix:.1f} | fallback={fallback_rate:.1%}"
+        )
+
         results.append(MethodTaskResult(
             method=_get_method_name(method),
             method_type=_get_method_type(method),
@@ -294,7 +307,7 @@ def run_single_method(
             avg_accepted_prefix=avg_prefix,
             fallback_rate=fallback_rate,
             full_refresh_rate=full_refresh_rate,
-            speedup_vs_full=1.0,  # computed later after all methods
+            speedup_vs_full=1.0,
         ))
 
     return results
@@ -302,27 +315,44 @@ def run_single_method(
 
 @hydra.main(version_base=None, config_path="../configs", config_name="benchmark/default")
 def main(cfg: DictConfig):
-    logger.info("=== E3-VLA Benchmark ===")
+    logger.info("=" * 60)
+    logger.info("E3-VLA Benchmark Evaluation")
+    logger.info("=" * 60)
     logger.info(f"Methods: {cfg.methods}")
-    logger.info(f"Checkpoint dir: {cfg.checkpoint_dir}")
+    logger.info(f"Checkpoints: {cfg.checkpoint_dir}")
+    logger.info(f"Model: {cfg.model.checkpoint}")
+
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        logger.info(f"GPU: {gpu_name} ({gpu_total:.1f} GB)")
 
     # Build env
     env_factory, task_names = build_libero_env_factory(cfg)
 
-    # Limit tasks for quick test
     if cfg.get("max_tasks", 0) > 0:
         task_names = task_names[:cfg.max_tasks]
 
-    logger.info(f"Tasks: {task_names}")
+    logger.info(f"Tasks: {len(task_names)} tasks — {task_names}")
+    logger.info(f"Episodes per task: {cfg.num_episodes}")
+    logger.info(f"Seeds: {len(cfg.seeds)} seeds")
+    logger.info(f"Total episodes: {len(task_names) * cfg.num_episodes} per method × "
+                f"{len(cfg.methods)} methods = "
+                f"{len(task_names) * cfg.num_episodes * len(cfg.methods)} total")
 
-    # Create output
     os.makedirs(cfg.output_dir, exist_ok=True)
 
     # Run each method
     report = ReportWriter(baseline_method="Full VLA (π₀)")
     all_results = []
+    t_total_start = time.time()
 
-    for method in cfg.methods:
+    for method_idx, method in enumerate(cfg.methods):
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Method {method_idx+1}/{len(cfg.methods)}: {_get_method_name(method)}")
+        logger.info(f"{'='*60}")
+        t_method_start = time.time()
+
         try:
             results = run_single_method(
                 method, cfg, cfg.checkpoint_dir,
@@ -331,10 +361,16 @@ def main(cfg: DictConfig):
             for r in results:
                 report.add_result(r)
             all_results.extend(results)
+
+            elapsed_method = time.time() - t_method_start
+            logger.info(f"Method complete in {elapsed_method/60:.1f} min")
         except Exception as e:
-            logger.error(f"Method '{method}' failed: {e}")
+            logger.error(f"Method '{method}' FAILED: {e}")
             logger.exception(e)
             continue
+
+    elapsed_total = time.time() - t_total_start
+    logger.info(f"\nAll methods complete in {elapsed_total/60:.1f} min")
 
     # Compute speedup vs baseline
     baseline_latency = {}
@@ -347,11 +383,16 @@ def main(cfg: DictConfig):
         r.speedup_vs_full = baseline / max(r.avg_latency_ms, 1e-6)
 
     # Save
-    report.to_json(os.path.join(cfg.output_dir, "benchmark_results.json"))
+    results_path = os.path.join(cfg.output_dir, "benchmark_results.json")
+    report.to_json(results_path)
+    logger.info(f"Results saved: {results_path}")
 
+    logger.info("\n" + "=" * 60)
+    logger.info("BENCHMARK RESULTS")
+    logger.info("=" * 60)
     logger.info("\n" + report.main_table())
     logger.info("\n" + report.latency_breakdown_table())
-    logger.info(f"\nResults saved to {cfg.output_dir}")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

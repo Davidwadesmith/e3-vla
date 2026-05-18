@@ -33,7 +33,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from e3vla.data.cache_writer import TeacherCacheWriter, CacheConfig
 from e3vla.schema import Observation
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("generate_cache")
 
 
 def build_adapter(cfg: DictConfig):
@@ -188,12 +193,22 @@ def run_rollout(
 
 @hydra.main(version_base=None, config_path="../configs", config_name="cache/default")
 def main(cfg: DictConfig):
-    logger.info("=== E3-VLA Teacher Cache Generation ===")
-    logger.info(OmegaConf.to_yaml(cfg))
+    logger.info("=" * 60)
+    logger.info("E3-VLA Teacher Cache Generation")
+    logger.info("=" * 60)
+    logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        logger.info(f"GPU: {gpu_name} ({gpu_total:.1f} GB)")
 
     # 1. Build adapter (real VLA model)
+    logger.info("Loading VLA model...")
     adapter = build_adapter(cfg).to(cfg.device)
     adapter.eval()
+    n_params = sum(p.numel() for p in adapter._model.parameters()
+                   if hasattr(adapter, '_model')) if hasattr(adapter, '_model') else '?'
+    logger.info(f"Model loaded: {n_params} parameters")
 
     # 2. Build environments
     env_factory = build_env(cfg)
@@ -206,14 +221,17 @@ def main(cfg: DictConfig):
         max_episodes=cfg.max_episodes,
     )
     writer = TeacherCacheWriter(cache_config, adapter)
+    logger.info(f"Cache output: {cfg.output_dir}")
+    logger.info(f"Shard size: {cfg.shard_size} records")
 
     # 4. Run rollouts
     n_episodes = min(cfg.max_episodes, len(env_factory) * cfg.episodes_per_task)
     n_total_timesteps = 0
     t0 = time.time()
 
-    logger.info(f"Starting {n_episodes} episodes...")
-    log_interval = max(1, n_episodes // 20)  # progress every 5%
+    logger.info(f"Starting {n_episodes} episodes ({len(env_factory)} tasks × "
+                f"{cfg.episodes_per_task} ep/task)...")
+    log_interval = max(1, n_episodes // 20)
 
     for ep in range(n_episodes):
         task_idx = ep % len(env_factory)
@@ -236,12 +254,15 @@ def main(cfg: DictConfig):
     writer.finalize()
     elapsed = time.time() - t0
 
-    logger.info(f"=== Complete ===")
-    logger.info(f"Episodes: {n_episodes}")
+    logger.info("=" * 60)
+    logger.info(f"Cache generation complete")
+    logger.info(f"Episodes executed: {n_episodes}")
     logger.info(f"Total timesteps: {n_total_timesteps}")
-    logger.info(f"Time: {elapsed / 60:.1f} min")
+    logger.info(f"Total records: {writer.num_records}")
+    logger.info(f"Time: {elapsed / 60:.1f} min ({elapsed / 3600:.1f} hours)")
+    logger.info(f"Avg per episode: {elapsed / max(1, n_episodes):.1f}s")
     logger.info(f"Output: {cfg.output_dir}")
-    logger.info(f"Records: {writer.num_records}")
+    logger.info("=" * 60)
 
     # Write summary
     summary = {
