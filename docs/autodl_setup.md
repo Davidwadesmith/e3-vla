@@ -43,17 +43,17 @@ python -c "import torch; import safetensors; import hydra; print('OK')"
 ## 3. 数据盘挂载与目录布局
 
 ```bash
-# autodl 数据盘默认路径为 /root/autodl-fs
+# autodl 数据盘默认路径为 /root/autodl-tmp
 # 将大文件目录软链到数据盘
 
-mkdir -p /root/autodl-fs/teacher_cache
-mkdir -p /root/autodl-fs/checkpoints
-mkdir -p /root/autodl-fs/experiments
-mkdir -p /root/autodl-fs/wandb
+mkdir -p /root/autodl-tmp/teacher_cache
+mkdir -p /root/autodl-tmp/checkpoints
+mkdir -p /root/autodl-tmp/experiments
+mkdir -p /root/autodl-tmp/wandb
 
-ln -s /root/autodl-fs/teacher_cache ./teacher_cache
-ln -s /root/autodl-fs/checkpoints  ./checkpoints
-ln -s /root/autodl-fs/experiments  ./experiments
+ln -s /root/autodl-tmp/teacher_cache ./teacher_cache
+ln -s /root/autodl-tmp/checkpoints  ./checkpoints
+ln -s /root/autodl-tmp/experiments  ./experiments
 ```
 
 系统盘 (`/root/e3-vla/`) 只放代码；所有产出（cache、checkpoint、结果）全部落在数据盘。关机后系统盘清空，数据盘保留。
@@ -64,14 +64,14 @@ ln -s /root/autodl-fs/experiments  ./experiments
 
 ```bash
 # 方式 A: scp（本机执行）
-scp -rP <ssh_port> ./teacher_cache root@<autodl_ip>:/root/autodl-fs/
+scp -rP <ssh_port> ./teacher_cache root@<autodl_ip>:/root/autodl-tmp/
 
 # 方式 B: autodl 控制台的文件传输功能
 # 方式 C: 先 tar 再传
 tar -czf teacher_cache.tar.gz teacher_cache/
-scp -P <ssh_port> teacher_cache.tar.gz root@<ip>:/root/autodl-fs/
+scp -P <ssh_port> teacher_cache.tar.gz root@<ip>:/root/autodl-tmp/
 # 服务器上解压
-cd /root/autodl-fs && tar -xzf teacher_cache.tar.gz
+cd /root/autodl-tmp && tar -xzf teacher_cache.tar.gz
 ```
 
 如果没预生成 cache，在服务器上跑 `scripts/generate_cache.py` 先采集：
@@ -80,7 +80,7 @@ cd /root/autodl-fs && tar -xzf teacher_cache.tar.gz
 python scripts/generate_cache.py \
     env=libero \
     model=openpi \
-    output_dir=/root/autodl-fs/teacher_cache \
+    output_dir=/root/autodl-tmp/teacher_cache \
     max_episodes=200
 ```
 
@@ -105,23 +105,23 @@ print(f'Max: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
 # Step 1: NoCachedAE baseline（验证 Gate G1）
 uv run python scripts/train_drafter.py \
     model=no_cached_ae \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_cached_ae
+    checkpoint.save_dir=/root/autodl-tmp/checkpoints/no_cached_ae
 
 # Step 2: CachedAE-NoOffset（验证 cached AE 是否有增益）
 uv run python scripts/train_drafter.py \
     model=cached_ae_no_offset \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/cached_ae_no_offset
+    checkpoint.save_dir=/root/autodl-tmp/checkpoints/cached_ae_no_offset
 
 # Step 3: CachedAE-FullOffset（Ours，验证 Gate G2）
 uv run python scripts/train_drafter.py \
     model=default \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/ours
+    checkpoint.save_dir=/root/autodl-tmp/checkpoints/ours
 ```
 
 ## 7. 注意事项
@@ -130,9 +130,9 @@ uv run python scripts/train_drafter.py \
 
 ```bash
 # 确认所有产出在数据盘，不在系统盘
-ls /root/autodl-fs/checkpoints/
-ls /root/autodl-fs/experiments/
-ls /root/autodl-fs/wandb/
+ls /root/autodl-tmp/checkpoints/
+ls /root/autodl-tmp/experiments/
+ls /root/autodl-tmp/wandb/
 ```
 
 ### 7.2 不要用 pip 覆盖 autodl 自带的 PyTorch
@@ -179,7 +179,7 @@ nvitop  # pip install nvitop
 sudo shutdown now
 
 # 查看磁盘用量
-df -h /root/autodl-fs
+df -h /root/autodl-tmp
 
 # 查看当前实例 ID 和到期时间
 cat /root/.autodl/instance_id 2>/dev/null

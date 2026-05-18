@@ -1,5 +1,114 @@
 # E3-VLA 实验流程说明
 
+## AutoDL 环境配置
+
+> 本节供 Agent 在 AutoDL 上自动化执行。如使用其他平台可跳过。
+
+### 存储路径说明
+
+AutoDL 实例有四类存储：
+
+| 路径 | 类型 | 大小 | 特点 |
+|------|------|------|------|
+| `/` | 系统盘（本地 SSD） | 30 GB | 快，关机保留，可保存为镜像 |
+| `/root/autodl-tmp` | 数据盘（本地 SSD） | 50 GB 起可扩容 | 快，关机保留，**实验产物放这里** |
+| `/root/autodl-fs` | 文件存储（NAS 网络盘） | 20 GB 免费 | 同地区多实例共享，高可靠，慢 |
+| `/root/autodl-pub` | 公共数据 | — | 只读，预置数据集和模型 |
+
+**关键规则**：系统盘 30 GB 只放代码和系统依赖；teacher cache（~25 GB）和 checkpoints（~5 GB）必须放 `/root/autodl-tmp`。关机后所有数据保留，但连续关机 15 天会被自动释放。重要结果建议拷贝一份到 `/root/autodl-fs`。
+
+### 租机参数
+
+| 参数 | 选择 |
+|------|------|
+| GPU | A100 40G（推荐） / RTX PRO 6000 / A40 48G |
+| 镜像 | `PyTorch 2.5+ / CUDA 12.4 / Python 3.12` |
+| 数据盘 | 勾选「可扩容」，设 100 GB |
+| 计费 | 按量计费（先跑通）→ 确认无误后转包天 |
+
+### 开机后初始化脚本
+
+```bash
+# === AutoDL 环境初始化（Agent 从零配置） ===
+# 预期：租机完成后，以 root 身份执行
+
+set -e
+echo "=== AutoDL E3-VLA 环境初始化 ==="
+date
+
+# 1. 验证基础环境
+nvidia-smi
+python -c "import torch; assert torch.cuda.is_available(), 'CUDA NOT AVAILABLE'; print(torch.__version__, torch.cuda.get_device_name(0))"
+echo "CUDA OK"
+
+# 2. 安装 uv（快速 Python 包管理器）
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source $HOME/.cargo/env
+fi
+echo "uv $(uv --version)"
+
+# 3. 克隆项目
+cd /root
+if [ ! -d e3-vla ]; then
+    git clone https://github.com/Davidwadesmith/e3-vla
+fi
+cd e3-vla
+
+# 4. 创建虚拟环境 + 安装依赖
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+pip install libero
+
+# 5. 如需 FLASH 竞品对比（可选）
+# uv pip install -e ".[benchmark]"
+
+# 6. 创建数据盘目录（所有大文件放 /root/autodl-tmp）
+mkdir -p /root/autodl-tmp/e3vla/{teacher_cache,checkpoints,experiments}
+
+# 7. 软链到项目目录
+ln -sf /root/autodl-tmp/e3vla/teacher_cache ./teacher_cache
+ln -sf /root/autodl-tmp/e3vla/checkpoints  ./checkpoints
+ln -sf /root/autodl-tmp/e3vla/experiments  ./experiments
+
+# 8. 验证
+python -m pytest tests/ -q
+
+echo "=== 初始化完成 ==="
+echo "数据盘: /root/autodl-tmp/e3vla/"
+du -sh /root/autodl-tmp/e3vla/
+```
+
+### 下载 π₀ Checkpoint
+
+AutoDL 的公共数据盘 `/root/autodl-pub` 可能已缓存 π₀。先检查：
+
+```bash
+# 优先检查公共数据盘
+find /root/autodl-pub -name "*pi0*" -o -name "*openpi*" 2>/dev/null
+
+# 如果没有，从 HuggingFace 下载到数据盘
+pip install huggingface_hub
+huggingface-cli download <pi0_repo> --local-dir /root/autodl-tmp/e3vla/pi0_checkpoints
+
+# 如果下载慢，用学术资源加速
+# export HF_ENDPOINT=https://hf-mirror.com
+```
+
+### 验证一切就绪
+
+```bash
+# 确认以下全部通过
+nvidia-smi                         # GPU 可见
+python -c "import torch; assert torch.cuda.is_available()"  # CUDA 可用
+python -m pytest tests/ -q         # 26 passed
+ls /root/autodl-tmp/e3vla/         # 数据盘可写
+df -h /root/autodl-tmp             # 数据盘空间充足（≥ 50 GB 剩余）
+```
+
+---
+
 ## 需要什么
 
 ### 硬件
@@ -59,7 +168,7 @@ uv run python scripts/generate_cache.py \
     env.suite=libero_10 \
     model=openpi \
     model.checkpoint=/path/to/pi0_base \
-    output_dir=/root/autodl-fs/teacher_cache \
+    output_dir=/root/autodl-tmp/e3vla/teacher_cache \
     max_episodes=100 \
     episodes_per_task=10
 
@@ -68,7 +177,7 @@ uv run python scripts/generate_cache.py \
     env=libero \
     model=openpi \
     model.checkpoint=/path/to/pi0_base \
-    output_dir=/root/autodl-fs/teacher_cache \
+    output_dir=/root/autodl-tmp/e3vla/teacher_cache \
     max_episodes=30 \
     episodes_per_task=10
 ```
@@ -89,23 +198,23 @@ uv run python scripts/generate_cache.py \
 # Baseline（无 cached AE）
 uv run python scripts/train_drafter.py \
     model=no_cached_ae \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/e3vla/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_cached_ae
+    checkpoint.save_dir=/root/autodl-tmp/e3vla/checkpoints/no_cached_ae
 
 # Ablation（cached AE，无 offset）
 uv run python scripts/train_drafter.py \
     model=cached_ae_no_offset \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/e3vla/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_offset
+    checkpoint.save_dir=/root/autodl-tmp/e3vla/checkpoints/no_offset
 
 # Ours（cached AE + offset alignment）
 uv run python scripts/train_drafter.py \
     model=default \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/e3vla/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/full_offset
+    checkpoint.save_dir=/root/autodl-tmp/e3vla/checkpoints/full_offset
 ```
 
 **这个过程做什么：**
@@ -121,9 +230,9 @@ uv run python scripts/train_drafter.py \
 uv run python scripts/run_benchmark.py \
     benchmark=ablation \
     model.checkpoint=/path/to/pi0_base \
-    checkpoint_dir=/root/autodl-fs/checkpoints \
+    checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints \
     num_episodes=50 \
-    output_dir=/root/autodl-fs/experiments/results
+    output_dir=/root/autodl-tmp/e3vla/experiments/results
 ```
 
 **这个过程做什么：**
@@ -162,7 +271,7 @@ done
 uv run python scripts/run_benchmark.py \
     benchmark=full_comparison \
     model.checkpoint=/path/to/pi0_base \
-    checkpoint_dir=/root/autodl-fs/checkpoints
+    checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 ```
 
 ---
@@ -184,7 +293,7 @@ uv run python scripts/run_benchmark.py \
 ## 目录布局总结
 
 ```
-/root/autodl-fs/           ← 数据盘（关机保留）
+/root/autodl-tmp/e3vla/    ← 数据盘（关机保留，> 50 GB）
 ├── teacher_cache/         ← Step 1 产出
 │   ├── metadata/records.jsonl
 │   ├── features/*.safetensors
@@ -204,7 +313,7 @@ uv run python scripts/run_benchmark.py \
 │       └── metrics.json
 └── pi0_checkpoints/       ← π₀ 模型（手动下载）
 
-/root/e3-vla/             ← 系统盘（关机清空）
+/root/e3-vla/             ← 系统盘 30 GB（关机保留）
     └── 代码（git clone）
 ```
 
@@ -216,7 +325,7 @@ uv run python scripts/run_benchmark.py \
 # 从头跑通（libero_10, 100 episodes）
 uv run python scripts/generate_cache.py \
     env.suite=libero_10 \
-    model.checkpoint=/root/autodl-fs/pi0_checkpoints/pi0_base \
+    model.checkpoint=/root/autodl-tmp/e3vla/pi0_checkpoints/pi0_base \
     max_episodes=100
 
 # 三个训练并行
@@ -226,7 +335,7 @@ done
 
 # benchmark（等训练完）
 uv run python scripts/run_benchmark.py \
-    model.checkpoint=/root/autodl-fs/pi0_checkpoints/pi0_base \
+    model.checkpoint=/root/autodl-tmp/e3vla/pi0_checkpoints/pi0_base \
     seeds="[42,123,456,789,1024,2048,4096,8192,16384,32768]"
 
 # 报告
@@ -244,7 +353,7 @@ uv run python scripts/generate_report.py --results .../benchmark_results.json
 ```bash
 # 查看三个模型的 best val_loss
 for m in no_cached_ae no_offset full_offset; do
-    ckpt=/root/autodl-fs/checkpoints/$m/best.pt
+    ckpt=/root/autodl-tmp/e3vla/checkpoints/$m/best.pt
     if [ -f $ckpt ]; then
         python -c "
 import torch
@@ -266,7 +375,7 @@ done
 ### 2. 检查 Benchmark 结果文件
 
 ```bash
-cat /root/autodl-fs/experiments/results/benchmark_results.json | python -c "
+cat /root/autodl-tmp/e3vla/experiments/results/benchmark_results.json | python -c "
 import json, sys
 data = json.load(sys.stdin)
 results = data.get('results', data if isinstance(data, list) else [])
@@ -292,7 +401,7 @@ for m in sorted(methods):
 python -c "
 import json, sys
 
-results_path = '/root/autodl-fs/experiments/results/benchmark_results.json'
+results_path = '/root/autodl-tmp/e3vla/experiments/results/benchmark_results.json'
 try:
     with open(results_path) as f:
         data = json.load(f)
@@ -427,7 +536,7 @@ for m in no_cached_ae no_offset full_offset; do
     echo "=== $m ==="
     python -c "
 import torch
-c = torch.load('/root/autodl-fs/checkpoints/$m/best.pt', map_location='cpu', weights_only=False)
+c = torch.load('/root/autodl-tmp/e3vla/checkpoints/$m/best.pt', map_location='cpu', weights_only=False)
 for k, v in c.items():
     if isinstance(v, (int, float)):
         print(f'  {k}: {v}')
@@ -440,24 +549,24 @@ done
 ```bash
 echo "=== Output Inventory ==="
 echo "Teacher cache:"
-du -sh /root/autodl-fs/teacher_cache/
-ls /root/autodl-fs/teacher_cache/metadata/records.jsonl && echo "  metadata OK" || echo "  metadata MISSING"
-ls /root/autodl-fs/teacher_cache/features/shard_0000.safetensors && echo "  features OK" || echo "  features MISSING"
+du -sh /root/autodl-tmp/e3vla/teacher_cache/
+ls /root/autodl-tmp/e3vla/teacher_cache/metadata/records.jsonl && echo "  metadata OK" || echo "  metadata MISSING"
+ls /root/autodl-tmp/e3vla/teacher_cache/features/shard_0000.safetensors && echo "  features OK" || echo "  features MISSING"
 
 echo ""
 echo "Checkpoints:"
 for m in no_cached_ae no_offset full_offset; do
-    ckpt=/root/autodl-fs/checkpoints/$m/best.pt
+    ckpt=/root/autodl-tmp/e3vla/checkpoints/$m/best.pt
     [ -f $ckpt ] && echo "  $m: $(du -h $ckpt | cut -f1)" || echo "  $m: MISSING"
 done
 
 echo ""
 echo "Results:"
-ls /root/autodl-fs/experiments/results/benchmark_results.json && echo "  results OK" || echo "  results MISSING"
+ls /root/autodl-tmp/e3vla/experiments/results/benchmark_results.json && echo "  results OK" || echo "  results MISSING"
 
 echo ""
 echo "Report:"
-ls /root/autodl-fs/experiments/report/main_table.csv && echo "  main_table OK" || echo "  report not yet generated"
+ls /root/autodl-tmp/e3vla/experiments/report/main_table.csv && echo "  main_table OK" || echo "  report not yet generated"
 ```
 
 ### 6. 常见异常及处理

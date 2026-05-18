@@ -4,18 +4,18 @@ Usage:
   # Full comparison (all methods, LIBERO)
   uv run python scripts/run_benchmark.py \
       benchmark=full_comparison \
-      checkpoint_dir=/root/autodl-fs/checkpoints
+      checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 
   # Ablation only (E3-VLA variants)
   uv run python scripts/run_benchmark.py \
       benchmark=ablation \
-      checkpoint_dir=/root/autodl-fs/checkpoints
+      checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 
   # Single method quick test
   uv run python scripts/run_benchmark.py \
       benchmark=single \
       benchmark.method=ours \
-      checkpoint_dir=/root/autodl-fs/checkpoints
+      checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 """
 
 import os

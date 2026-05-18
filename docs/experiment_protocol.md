@@ -45,7 +45,7 @@ uv run python scripts/generate_cache.py \
     env=libero \
     model=openpi \
     model.checkpoint=/path/to/pi0_checkpoint \
-    output_dir=/root/autodl-fs/teacher_cache \
+    output_dir=/root/autodl-tmp/e3vla/teacher_cache \
     max_episodes=100
 
 # Single-task quick test
@@ -53,7 +53,7 @@ uv run python scripts/generate_cache.py \
     env.suite=libero_spatial \
     env.task=libero_spatial_pick_place \
     model=openpi \
-    output_dir=/root/autodl-fs/teacher_cache \
+    output_dir=/root/autodl-tmp/e3vla/teacher_cache \
     max_episodes=5
 ```
 
@@ -79,9 +79,9 @@ FLASH-style baseline without cached AE features.
 ```bash
 uv run python scripts/train_drafter.py \
     model=no_cached_ae \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/e3vla/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_cached_ae
+    checkpoint.save_dir=/root/autodl-tmp/e3vla/checkpoints/no_cached_ae
 ```
 
 **Expected:** `checkpoints/no_cached_ae/best.pt`
@@ -95,9 +95,9 @@ Cached AE features, no offset alignment.
 ```bash
 uv run python scripts/train_drafter.py \
     model=cached_ae_no_offset \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/e3vla/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/no_offset
+    checkpoint.save_dir=/root/autodl-tmp/e3vla/checkpoints/no_offset
 ```
 
 **Gate G1:** Compare `l_total` and accepted prefix length vs NoCachedAE.
@@ -112,9 +112,9 @@ Full method with offset alignment.
 ```bash
 uv run python scripts/train_drafter.py \
     model=default \
-    data.cache_dir=/root/autodl-fs/teacher_cache \
+    data.cache_dir=/root/autodl-tmp/e3vla/teacher_cache \
     training.epochs=100 \
-    checkpoint.save_dir=/root/autodl-fs/checkpoints/full_offset
+    checkpoint.save_dir=/root/autodl-tmp/e3vla/checkpoints/full_offset
 ```
 
 **Gate G2:** Offset alignment must further improve metrics vs NoOffset.
@@ -130,13 +130,13 @@ Run all methods through the same environment for fair comparison.
 uv run python scripts/run_benchmark.py \
     benchmark=ablation \
     model.checkpoint=/path/to/pi0_checkpoint \
-    checkpoint_dir=/root/autodl-fs/checkpoints
+    checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 
 # Full comparison (all methods)
 uv run python scripts/run_benchmark.py \
     benchmark=full_comparison \
     model.checkpoint=/path/to/pi0_checkpoint \
-    checkpoint_dir=/root/autodl-fs/checkpoints
+    checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints
 ```
 
 **Methods evaluated:**
@@ -196,8 +196,8 @@ NoOffset → TimeOnly → PoseOffset → FullOffset
 for tau in 0.1 0.2 0.3 0.5 0.7 1.0; do
     uv run python scripts/run_benchmark.py \
         verifier.tau_radius=$tau \
-        checkpoint_dir=/root/autodl-fs/checkpoints \
-        output_dir=/root/autodl-fs/experiments/sweep_tau_${tau}
+        checkpoint_dir=/root/autodl-tmp/e3vla/checkpoints \
+        output_dir=/root/autodl-tmp/e3vla/experiments/sweep_tau_${tau}
 done
 ```
 

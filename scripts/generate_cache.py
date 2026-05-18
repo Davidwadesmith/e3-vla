@@ -5,7 +5,7 @@ Usage:
   uv run python scripts/generate_cache.py \
       env=libero_spatial \
       model=openpi \
-      output_dir=/root/autodl-fs/teacher_cache \
+      output_dir=/root/autodl-tmp/e3vla/teacher_cache \
       max_episodes=100
 
   # Single-task debug run

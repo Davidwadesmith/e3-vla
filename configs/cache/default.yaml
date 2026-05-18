@@ -7,7 +7,7 @@ defaults:
   - env: libero
 
 # Output
-output_dir: /root/autodl-fs/teacher_cache
+output_dir: /root/autodl-tmp/e3vla/teacher_cache
 shard_size: 1000         # records per safetensors shard
 
 # Collection

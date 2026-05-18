@@ -15,7 +15,7 @@ methods:
   - ours
 
 # Checkpoints
-checkpoint_dir: /root/autodl-fs/checkpoints
+checkpoint_dir: /root/autodl-tmp/e3vla/checkpoints
 
 # Policy settings
 policy:
@@ -45,4 +45,4 @@ num_episodes: 50
 max_steps_per_episode: 300
 seeds: [42, 123, 456, 789, 1024, 2048, 4096, 8192, 16384, 32768]
 max_tasks: 0             # 0 = all tasks
-output_dir: /root/autodl-fs/experiments/results
+output_dir: /root/autodl-tmp/e3vla/experiments/results
