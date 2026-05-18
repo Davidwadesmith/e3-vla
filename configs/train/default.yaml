@@ -26,7 +26,7 @@ training:
 # Loss weights
 loss:
   lambda_smooth: 0.1
-  lambda_gripper: 0.5
+  lambda_gripper: 0.2
   lambda_uncert: 0.1
   lambda_align: 0.0    # disabled in MVP
 

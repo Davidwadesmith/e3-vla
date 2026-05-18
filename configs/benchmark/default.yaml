@@ -22,7 +22,7 @@ policy:
   chunk_len: 16
   max_cache_age: 50
   periodic_full_every_n: 10
-  full_exec_len: 2
+  full_exec_len: 6
   gripper_full_window: 3
 
 # Verifier settings
@@ -37,7 +37,7 @@ acceptor:
   tau_pos: 0.01
   tau_rot: 0.05
   tau_grip: 0.1
-  alpha_uncert: 1.0
+  alpha_uncert: 20.0
   gripper_phase_tighten: 0.5
 
 # Evaluation
